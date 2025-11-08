@@ -1,0 +1,270 @@
+#version 430 core
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (r32f, binding = 0) writeonly uniform image2D outImage;
+
+uniform int uSize = 2048;
+uniform int uOctaves = 6;
+uniform float uLacunarity = 2.2;
+uniform float uGain = 0.5;
+uniform float uScale = 1.0;
+uniform vec2 uSeed;
+
+
+uint hash(uint x)
+{
+    x += (x << 10u);
+    x ^= (x >> 6u);
+    x += (x << 3u);
+    x ^= (x >> 11u);
+    x += (x << 15u);
+    return x;
+}
+
+uint hash2d(uint x, uint y)
+{
+    return hash(x + hash(y));
+}
+
+
+float fade(float t)
+{
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+float lerp(float a, float b, float t)
+{
+    return a + t * (b - a);
+}
+
+float grad(int h, float x, float y)
+{
+    int hd = h & 7;
+    float u = (hd < 4) ? x : y;
+    float v = (hd < 4) ? y : x;
+    return ((hd & 1) != 0 ? -u : u) + ((hd & 2) != 0 ? -2.0 * v : 2.0 * v);
+}
+
+
+
+float perlin(vec2 p)
+{
+    ivec2 ip = ivec2(floor(p));
+    vec2 fp = fract(p);
+    
+    uint xi = uint(ip.x) & 255u;
+    uint yi = uint(ip.y) & 255u;
+    
+    int aa = int(hash2d(xi, yi) & 255u);
+    int ab = int(hash2d(xi, yi + 1u) & 255u);
+    int ba = int(hash2d(xi + 1u, yi) & 255u);
+    int bb = int(hash2d(xi + 1u, yi + 1u) & 255u);
+    
+    float u = fade(fp.x);
+    float v = fade(fp.y);
+    
+    float x1 = lerp(grad(aa, fp.x, fp.y),
+                    grad(ba, fp.x - 1.0, fp.y), u);
+    float x2 = lerp(grad(ab, fp.x, fp.y - 1.0),
+                    grad(bb, fp.x - 1.0, fp.y - 1.0), u);
+    
+    float value = lerp(x1, x2, v);
+    return value * 0.5 + 0.5;
+}
+
+
+
+float turbulence(vec2 p, int octaves)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+    float freq = 1.0;
+    
+    for (int i = 0; i < octaves; i++) {
+        sum += abs(perlin(p * freq) * 2.0 - 1.0) * amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return sum;
+}
+
+float ridgeNoise(vec2 p)
+{
+    float n = perlin(p) * 2.0 - 1.0;
+    return 1.0 - abs(n);
+}
+
+vec2 warp(vec2 p)
+{
+    float wx = perlin(p + vec2(0.0, 0.0)) * 2.0 - 1.0;
+    float wy = perlin(p + vec2(5.2, 1.3)) * 2.0 - 1.0;
+    return p + vec2(wx, wy) * 0.3;
+}
+
+
+
+float fbm(vec2 p)
+{
+    float sum = 0.0;
+    float amp = 1.0;
+    float freq = 1.0;
+    float maxAmp = 0.0;
+    
+    for (int i = 0; i < uOctaves; i++)
+    {
+        float n;
+        
+        if (i < 2) {
+            n = perlin(p * freq);
+        } else if (i < 4) {
+            float pn = perlin(p * freq);
+            float rn = ridgeNoise(p * freq);
+            n = mix(pn, rn, 0.4);
+        } else {
+            n = ridgeNoise(p * freq);
+        }
+        
+        sum += n * amp;
+        maxAmp += amp;
+        
+        amp *= uGain;
+        freq *= uLacunarity;
+    }
+    
+    return sum / maxAmp;
+}
+
+
+
+
+float lakeMask(vec2 p)
+{
+    
+    float lakes1 = perlin(p * 0.3 + vec2(100.0, 50.0));
+    lakes1 = pow(lakes1, 2.5); 
+    
+    
+    float lakes2 = perlin(p * 0.8 + vec2(300.0, 200.0));
+    lakes2 = pow(lakes2, 3.5);
+    
+    
+    float lakes3 = perlin(p * 0.5 + vec2(500.0, 100.0));
+    lakes3 = pow(lakes3, 3.0);
+    
+    
+    float lakes = max(lakes1, max(lakes2 * 0.7, lakes3 * 0.8));
+    
+    
+    float sizeVar = perlin(p * 0.6 + vec2(200.0, 150.0));
+    lakes *= mix(0.4, 1.0, sizeVar);
+    
+    return lakes;
+}
+
+
+
+float mountainMask(vec2 p)
+{
+    float mask = ridgeNoise(p * 0.05 + vec2(50.0, 75.0));
+    mask = pow(mask, 8.0); 
+    mask = smoothstep(0.3, 0.8, mask); 
+    
+    return mask;
+}
+
+// Un code toujours aussi moche
+
+float terrainHeight(vec2 p)
+{
+    
+    vec2 q = warp(p * 0.6);
+    
+    
+    float base = fbm(q);
+    
+    
+    float continental = perlin(p * 0.15) * 0.35;
+    
+    
+    float detail = turbulence(p * 6.0, 3) * 0.06;
+    
+    
+    float h = base * 0.5 + continental + detail;
+    
+    
+    float mtMask = mountainMask(p);
+    if (mtMask > 0.01) {
+        
+        float mountainDetail = ridgeNoise(p * 1.5) * turbulence(p * 3.0, 2);
+        h += mtMask * 0.4 * (1.0 + mountainDetail * 0.5);
+    }
+    
+    
+    float lakeDepression = lakeMask(p);
+    lakeDepression = smoothstep(0.25, 0.70, lakeDepression);
+    h -= lakeDepression * 0.4;
+    
+    
+    h = clamp(h, 0.0, 1.0);
+    
+    
+    if (h > 0.5) {
+        float mountainBoost = (h - 0.5) * 2.0;
+        mountainBoost = pow(mountainBoost, 0.8);
+        h = 0.5 + mountainBoost * 0.5;
+    } else {
+        h = pow(h, 1.1);
+    }
+    
+    
+    if (h < 0.18 && lakeDepression > 0.3) {
+        h = mix(0.05, 0.14, perlin(p * 20.0));
+    }
+    
+    
+    if (h > 0.15 && h < 0.22) {
+        float distToWater = (h - 0.15) / 0.07;
+        distToWater = smoothstep(0.0, 1.0, distToWater);
+        h = 0.15 + distToWater * 0.07;
+    }
+    
+    
+    
+    
+    if (h > 0.5 && h < 0.75) {
+        float terraceStrength = 0.06;
+        float terraceFreq = 12.0;
+        h += sin(h * terraceFreq * 3.14159) * terraceStrength * (h - 0.5);
+    }
+    
+    
+    if (h > 0.75) {
+        float peakDetail = ridgeNoise(p * 8.0) * 0.08;
+        h += peakDetail * (h - 0.75);
+    }
+    
+    
+    h = h * 1.15;
+    
+    return clamp(h, 0.0, 1.0);
+}
+
+
+
+void main()
+{
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= uSize || gid.y >= uSize)
+        return;
+    
+    
+    vec2 uv = (vec2(gid) - vec2(uSize) * 0.5) / float(uSize);
+    uv = uv * uScale * 6.0;
+    uv += uSeed;
+    
+    
+    float h = terrainHeight(uv);
+    
+    
+    imageStore(outImage, gid, vec4(h, 0.0, 0.0, 0.0));
+}

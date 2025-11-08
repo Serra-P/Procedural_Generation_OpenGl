@@ -1,0 +1,118 @@
+#version 430 core
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (rgba32f, binding = 0) readonly uniform image2D inputImage;
+layout (rgba32f, binding = 1) writeonly uniform image2D outputImage;
+
+uniform int uImageWidth;
+uniform int uImageHeight;
+
+
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+vec2 hash2(vec2 p) {
+    return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), 
+                          dot(p, vec2(269.5, 183.3)))) * 43758.5453);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+
+
+vec3 voronoi(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    
+    float minDist = 1.0;
+    float secondMinDist = 1.0;
+    vec2 minPoint;
+    
+    
+    for(int y = -1; y <= 1; y++) {
+        for(int x = -1; x <= 1; x++) {
+            vec2 neighbor = vec2(float(x), float(y));
+            vec2 point = hash2(i + neighbor);
+            
+            vec2 diff = neighbor + point - f;
+            float dist = length(diff);
+            
+            if(dist < minDist) {
+                secondMinDist = minDist;
+                minDist = dist;
+                minPoint = point;
+            } else if(dist < secondMinDist) {
+                secondMinDist = dist;
+            }
+        }
+    }
+    
+    
+    return vec3(minDist, secondMinDist, hash(i + floor(minPoint)));
+}
+
+
+// Du bruit et du voronoi on s'amuse
+float paperGrainMosaic(vec2 uv) {
+    
+    float scale = 120.0;
+    vec2 p = uv * scale;
+    
+    
+    vec3 v = voronoi(p);
+    float cellDist = v.x;      
+    float edgeDist = v.y - v.x; 
+    float cellValue = v.z;      
+    
+    
+    float cellGrain = 0.92 + cellValue * 0.16;
+    
+    
+    float edgeWidth = 0.01;
+    float edge = smoothstep(0.0, edgeWidth, edgeDist);
+    float edgeDarkness = 0.75;
+    
+    
+    float mosaic = mix(edgeDarkness, cellGrain, edge);
+    
+    
+    float fineGrain = noise(uv * 300.0) * 0.2;
+    mosaic += fineGrain;
+    
+    
+    float globalVariation = noise(uv * 20.0) * 0.6;
+    mosaic += globalVariation;
+    
+    return mosaic;
+}
+
+void main()
+{
+    ivec2 gid = ivec2(gl_GlobalInvocationID.xy);
+    if (gid.x >= uImageWidth || gid.y >= uImageHeight)
+        return;
+    
+    vec2 uv = vec2(gid) / vec2(float(uImageWidth), float(uImageHeight));
+    
+    
+    vec3 color = imageLoad(inputImage, gid).rgb;
+    
+    
+    float paper = paperGrainMosaic(uv);
+    color *= paper;
+    
+    imageStore(outputImage, gid, vec4(color, 1.0));
+}
